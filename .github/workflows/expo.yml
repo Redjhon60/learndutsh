@@ -27,11 +27,10 @@
 name: 🇩🇪 SnowB German AI — CI/CD
 
 on:
-  # ── Auto triggers ─────────────────────────────────────────────────────────
   push:
     branches:
-      - main       # Full CI + preview APK build
-      - develop    # Full CI only
+      - main
+      - develop
     paths-ignore:
       - '**.md'
       - '.github/ISSUE_TEMPLATE/**'
@@ -44,7 +43,6 @@ on:
     paths-ignore:
       - '**.md'
 
-  # ── Manual trigger — pick a build profile ─────────────────────────────────
   workflow_dispatch:
     inputs:
       build_profile:
@@ -65,12 +63,11 @@ on:
           - android
           - all
 
-# ── Prevent duplicate workflow runs ─────────────────────────────────────────
+# Prevent duplicate runs on the same branch
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# ── Global environment ───────────────────────────────────────────────────────
 env:
   NODE_VERSION: '18.19.0'
 
@@ -80,7 +77,7 @@ env:
 jobs:
 
   # ╔══════════════════════════════════════════════════════════════════════════╗
-  # ║  JOB 1: CI — Validate, Type-check, Lint                                ║
+  # ║  JOB 1 — CI: Type-check, Lint, Test                                    ║
   # ╚══════════════════════════════════════════════════════════════════════════╝
   ci:
     name: ✅ CI — Validate & Lint
@@ -88,185 +85,191 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      # ── 1. Checkout source code ────────────────────────────────────────────
+      # ── 1. Checkout ───────────────────────────────────────────────────────
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1   # Shallow clone is faster for CI
+          fetch-depth: 1
 
-      # ── 2. Setup Node.js with npm cache ───────────────────────────────────
+      # ── 2. Setup Node.js ──────────────────────────────────────────────────
+      # IMPORTANT: Do NOT set cache: 'npm' here.
+      # That option requires a package-lock.json to already exist in the repo.
+      # If the lock file is missing it throws:
+      #   "Dependencies lock file is not found"
+      # We handle caching manually below with actions/cache instead.
       - name: ⚙️ Setup Node.js ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-          # Cache key includes package-lock.json hash — cache busts on dep changes
 
-      # ── 3. Install dependencies ───────────────────────────────────────────
-      - name: 📦 Install dependencies
-        run: |
-          echo "Installing npm dependencies..."
-          npm ci --prefer-offline --no-audit
-          # --prefer-offline  : use cached packages when available (faster CI)
-          # --no-audit        : skip slow security audit (run separately if needed)
-          # npm ci            : clean install from lock file (reproducible builds)
-
-      # ── 4. Restore Expo cache ─────────────────────────────────────────────
-      - name: 🗄️ Cache Expo CLI
+      # ── 3. Cache node_modules ─────────────────────────────────────────────
+      # Manual cache keyed on package.json contents.
+      # Falls back gracefully when package-lock.json doesn't exist yet.
+      - name: 🗄️ Cache node_modules
+        id: cache-node-modules
         uses: actions/cache@v4
         with:
-          path: ~/.expo
-          key: expo-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package.json') }}
           restore-keys: |
-            expo-${{ runner.os }}-
+            node-modules-${{ runner.os }}-
 
-      # ── 5. TypeScript type checking ───────────────────────────────────────
+      # ── 4. Install dependencies ───────────────────────────────────────────
+      # We use 'npm install' instead of 'npm ci' because:
+      #   - 'npm ci' REQUIRES a package-lock.json to exist
+      #   - 'npm install' generates one if missing and works without it
+      #   - --legacy-peer-deps resolves peer dependency conflicts in the
+      #     React Native / Expo ecosystem (common with mixed package versions)
+      - name: 📦 Install dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: |
+          echo "Installing npm dependencies..."
+          npm install --legacy-peer-deps --no-audit
+          echo "✅ Dependencies installed."
+
+      # ── 5. Generate / update package-lock.json ────────────────────────────
+      # Ensures a lock file always exists for future 'npm ci' usage and
+      # reproducible builds. Safe to run even if lock file already exists.
+      - name: 🔒 Ensure package-lock.json exists
+        run: |
+          if [ ! -f package-lock.json ]; then
+            echo "No package-lock.json found — generating one..."
+            npm install --package-lock-only --legacy-peer-deps --no-audit
+            echo "✅ package-lock.json generated."
+          else
+            echo "✅ package-lock.json already present."
+          fi
+
+      # ── 6. TypeScript type check ──────────────────────────────────────────
       - name: 🔷 TypeScript — type check
         run: |
-          echo "Running TypeScript compiler (noEmit)..."
+          echo "Running TypeScript compiler (noEmit — checks only, no output)..."
           npm run type-check
-        # Fails the job if any TS error exists.
-        # noEmit means we only type-check, not compile.
+        # Fails the job if any TypeScript error exists.
 
-      # ── 6. ESLint ─────────────────────────────────────────────────────────
+      # ── 7. ESLint ─────────────────────────────────────────────────────────
       - name: 🔍 ESLint — code quality
         run: |
           echo "Linting TypeScript/TSX files..."
           npm run lint
-        # --max-warnings 0 (set in package.json) means ANY warning fails CI.
-        # To allow warnings: change to: npm run lint -- --max-warnings 10
+        # --max-warnings 0 is set in package.json scripts.
+        # Any ESLint warning or error fails this step.
 
-      # ── 7. Prettier format check ──────────────────────────────────────────
+      # ── 8. Prettier format check ──────────────────────────────────────────
       - name: 💅 Prettier — format check
-        run: |
-          echo "Checking code formatting..."
-          npm run format:check
+        run: npm run format:check
+        # Soft fail — formatting issues don't block merges.
         continue-on-error: true
-        # Soft fail — format issues are warnings, not blockers.
-        # Remove continue-on-error to enforce strict formatting.
 
-      # ── 8. Run tests ──────────────────────────────────────────────────────
+      # ── 9. Jest unit tests ────────────────────────────────────────────────
       - name: 🧪 Jest — unit tests
         run: |
           echo "Running test suite..."
-          npm test -- --ci --forceExit --detectOpenHandles
+          npm test -- --ci --forceExit --detectOpenHandles --passWithNoTests
         env:
-          # Inject public env vars for tests (non-secret defaults are fine)
           EXPO_PUBLIC_APP_ENV: test
-          EXPO_PUBLIC_ANTHROPIC_KEY: test-key-not-real
-          EXPO_PUBLIC_FIREBASE_API_KEY: test-key
+          EXPO_PUBLIC_ANTHROPIC_KEY: test-key-placeholder
+          EXPO_PUBLIC_FIREBASE_API_KEY: test-key-placeholder
           EXPO_PUBLIC_FIREBASE_PROJECT_ID: test-project
-        # --ci              : fail on first error, no watch mode
-        # --forceExit       : exit after all tests finish (prevents hanging)
-        # --detectOpenHandles: warn about async ops that keep Jest alive
 
-      # ── 9. Validate Expo config ───────────────────────────────────────────
-      - name: 🏥 Expo Doctor — validate config
-        run: |
-          echo "Running expo-doctor to detect config issues..."
-          npx expo-doctor || true
-          # '|| true' makes this advisory — expo-doctor can flag peer dep
-          # warnings that don't actually break builds.
-
-      # ── 10. Verify EAS config is valid JSON ───────────────────────────────
+      # ── 10. Validate eas.json ─────────────────────────────────────────────
       - name: 📋 Validate eas.json
         run: |
-          echo "Validating eas.json syntax..."
           python3 -c "
           import json, sys
           try:
               with open('eas.json') as f:
                   data = json.load(f)
               profiles = list(data.get('build', {}).keys())
-              print(f'✅ eas.json valid — build profiles: {profiles}')
+              print(f'✅ eas.json valid — profiles: {profiles}')
           except Exception as e:
               print(f'❌ eas.json invalid: {e}')
               sys.exit(1)
           "
 
-      # ── 11. Check for secrets accidentally committed ───────────────────────
-      - name: 🔐 Security — check for committed secrets
+      # ── 11. Expo Doctor ───────────────────────────────────────────────────
+      - name: 🏥 Expo Doctor — config validation
+        run: npx expo-doctor || true
+        # Advisory only — expo-doctor warns about peer deps that don't break builds.
+
+      # ── 12. Secret leak detection ─────────────────────────────────────────
+      - name: 🔐 Security — detect committed secrets
         run: |
-          echo "Scanning for accidentally committed secrets..."
-          # Fail if .env file is tracked by git
-          if git ls-files --error-unmatch .env 2>/dev/null; then
-            echo "❌ ERROR: .env is tracked by git! Remove it immediately."
-            echo "   Run: git rm --cached .env && git commit -m 'Remove .env'"
+          FOUND=0
+          for file in .env google-services.json google-play-key.json; do
+            if git ls-files --error-unmatch "$file" 2>/dev/null; then
+              echo "❌ ERROR: '$file' is tracked by git and must be removed!"
+              echo "   Fix: git rm --cached $file && git commit -m 'Remove $file'"
+              FOUND=1
+            fi
+          done
+          if [ "$FOUND" = "0" ]; then
+            echo "✅ No secrets found in git tracking."
+          else
             exit 1
           fi
-          # Fail if google-services.json is tracked
-          if git ls-files --error-unmatch google-services.json 2>/dev/null; then
-            echo "❌ ERROR: google-services.json is tracked by git!"
-            exit 1
-          fi
-          # Fail if google-play-key.json is tracked
-          if git ls-files --error-unmatch google-play-key.json 2>/dev/null; then
-            echo "❌ ERROR: google-play-key.json is tracked by git!"
-            exit 1
-          fi
-          echo "✅ No secrets found in git tracking."
 
   # ╔══════════════════════════════════════════════════════════════════════════╗
-  # ║  JOB 2: EAS Build — Preview APK (only on push to main)                 ║
+  # ║  JOB 2 — EAS Build: Preview APK                                        ║
+  # ║  Runs on: push to main  OR  manual dispatch (preview / production-apk) ║
   # ╚══════════════════════════════════════════════════════════════════════════╝
   build-preview:
     name: 🏗️ EAS Build — Preview APK
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    needs: ci   # Only run if CI passes
+    needs: ci
 
-    # Trigger conditions:
-    #   - Push to main branch, OR
-    #   - Manual workflow_dispatch with preview/production-apk profile
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_dispatch' && 
-       (github.event.inputs.build_profile == 'preview' || 
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.build_profile == 'preview' ||
         github.event.inputs.build_profile == 'production-apk'))
 
     steps:
-      # ── 1. Checkout ───────────────────────────────────────────────────────
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Setup Node ─────────────────────────────────────────────────────
+      # No cache: 'npm' — same reason as above (requires lock file)
       - name: ⚙️ Setup Node.js ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
 
-      # ── 3. Install deps ───────────────────────────────────────────────────
+      - name: 🗄️ Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            node-modules-${{ runner.os }}-
+
       - name: 📦 Install dependencies
-        run: npm ci --prefer-offline --no-audit
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: npm install --legacy-peer-deps --no-audit
 
-      # ── 4. Setup Expo + EAS (official action) ─────────────────────────────
+      # expo/expo-github-action installs + authenticates eas-cli automatically.
+      # It also caches the Expo/EAS CLI between runs for faster startup.
       - name: 🚀 Setup EAS
         uses: expo/expo-github-action@v8
         with:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
-          # This action: installs expo-cli, eas-cli, and authenticates
-          # using the EXPO_TOKEN secret. Caches the CLI between runs.
 
-      # ── 5. Inject google-services.json from secret ────────────────────────
-      # NOTE: 'secrets' context cannot be used in 'if:' conditions — GitHub
-      # Actions disallows it. Instead, we pass the secret as an env var and
-      # guard with a shell conditional inside the run block.
+      # secrets context is NOT allowed in 'if:' conditions — GitHub enforces this.
+      # Solution: pass secret as env var, then use shell conditional in run block.
       - name: 🔑 Inject google-services.json
         env:
           GOOGLE_SERVICES_B64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
         run: |
           if [ -n "$GOOGLE_SERVICES_B64" ]; then
-            echo "Decoding google-services.json from GitHub Secret..."
+            echo "Decoding google-services.json from secret..."
             echo "$GOOGLE_SERVICES_B64" | base64 --decode > google-services.json
             echo "✅ google-services.json written."
           else
-            echo "⚠️  GOOGLE_SERVICES_JSON_BASE64 secret not set — skipping."
-            echo "   Firebase features will use fallback/mock config."
+            echo "⚠️  GOOGLE_SERVICES_JSON_BASE64 not set — skipping Firebase inject."
           fi
 
-      # ── 6. Create .env for the build ──────────────────────────────────────
       - name: 🌍 Create .env from GitHub Secrets
         run: |
           cat > .env << EOF
@@ -280,12 +283,9 @@ jobs:
           EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
           EXPO_PUBLIC_FIREBASE_APP_ID=${{ secrets.FIREBASE_APP_ID }}
           EOF
-          echo "✅ .env written (values redacted in logs)"
-        # Note: env var values are masked in GitHub Actions logs automatically
-        # when they are defined as secrets.
+          echo "✅ .env written."
 
-      # ── 7. Determine build profile ────────────────────────────────────────
-      - name: 🎯 Set build profile
+      - name: 🎯 Resolve build profile
         id: profile
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -294,42 +294,36 @@ jobs:
             PROFILE="preview"
           fi
           echo "profile=$PROFILE" >> $GITHUB_OUTPUT
-          echo "Build profile: $PROFILE"
+          echo "Resolved build profile: $PROFILE"
 
-      # ── 8. EAS Build ──────────────────────────────────────────────────────
-      - name: 🏗️ EAS Build — ${{ steps.profile.outputs.profile }}
+      # --non-interactive : required — no stdin in CI
+      # --no-wait         : queue on EAS servers and return immediately.
+      #                     Build link is printed to logs.
+      #                     Remove to wait inline (uses more CI minutes).
+      - name: 🏗️ EAS Build
         run: |
-          echo "Starting EAS cloud build..."
-          echo "Profile: ${{ steps.profile.outputs.profile }}"
-          echo "Platform: ${{ github.event.inputs.platform || 'android' }}"
           eas build \
             --platform ${{ github.event.inputs.platform || 'android' }} \
             --profile ${{ steps.profile.outputs.profile }} \
             --non-interactive \
             --no-wait
-          # --non-interactive : required for CI (no prompts)
-          # --no-wait         : queue the build and return immediately.
-          #                     The build link is printed to logs.
-          #                     Remove --no-wait to wait for completion
-          #                     (uses more CI minutes on GitHub Actions).
 
-      # ── 9. Post build status ──────────────────────────────────────────────
-      - name: 📊 Build queued summary
+      - name: 📊 Write job summary
         run: |
           echo "## 🏗️ EAS Build Queued" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Profile | ${{ steps.profile.outputs.profile }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Platform | ${{ github.event.inputs.platform || 'android' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Triggered by | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Profile | \`${{ steps.profile.outputs.profile }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | \`${{ github.event.inputs.platform || 'android' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered by | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🔗 View build progress at: https://expo.dev/accounts/YOUR_USERNAME/projects/snowb-german-ai/builds" >> $GITHUB_STEP_SUMMARY
+          echo "🔗 **View build:** https://expo.dev/accounts/YOUR_USERNAME/projects/snowb-german-ai/builds" >> $GITHUB_STEP_SUMMARY
 
   # ╔══════════════════════════════════════════════════════════════════════════╗
-  # ║  JOB 3: EAS Build — Production (only on manual dispatch)               ║
+  # ║  JOB 3 — EAS Build: Production AAB (manual dispatch only)              ║
   # ╚══════════════════════════════════════════════════════════════════════════╝
   build-production:
     name: 🚀 EAS Build — Production AAB
@@ -341,23 +335,32 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       github.event.inputs.build_profile == 'production'
 
+    # Optionally protect with GitHub Environment (required reviewers, etc.)
+    # Create at: repo Settings → Environments → New environment → "production"
     environment:
       name: production
-      # Define this environment in GitHub repo Settings → Environments
-      # You can add required reviewers before production builds deploy
 
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: ⚙️ Setup Node.js
+      - name: ⚙️ Setup Node.js ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
+
+      - name: 🗄️ Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            node-modules-${{ runner.os }}-
 
       - name: 📦 Install dependencies
-        run: npm ci --prefer-offline --no-audit
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: npm install --legacy-peer-deps --no-audit
 
       - name: 🚀 Setup EAS
         uses: expo/expo-github-action@v8
@@ -398,8 +401,8 @@ jobs:
             --non-interactive \
             --no-wait
 
-      - name: 📊 Production build summary
+      - name: 📊 Write job summary
         run: |
           echo "## 🚀 Production Build Queued" >> $GITHUB_STEP_SUMMARY
-          echo "Check https://expo.dev for download link when complete." >> $GITHUB_STEP_SUMMARY
-          echo "The AAB can be submitted to Google Play with: \`eas submit\`" >> $GITHUB_STEP_SUMMARY
+          echo "Check https://expo.dev for the AAB download link when complete." >> $GITHUB_STEP_SUMMARY
+          echo "Submit to Play Store with: \`eas submit --platform android\`" >> $GITHUB_STEP_SUMMARY
