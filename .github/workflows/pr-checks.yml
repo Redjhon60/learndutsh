@@ -1,7 +1,6 @@
 # =============================================================================
 # SnowB German AI — PR Quality Gate
-# Runs on every pull request to ensure code quality before merge.
-# This is a lighter, faster workflow than the full CI.
+# Runs on every pull request. Faster and lighter than the full CI workflow.
 # =============================================================================
 
 name: 🔍 PR Quality Gate
@@ -20,21 +19,31 @@ jobs:
     name: 🔍 Quality Gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Skip draft PRs
     if: github.event.pull_request.draft == false
 
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
+      # No cache: 'npm' — requires package-lock.json in repo.
+      # Use manual node_modules cache instead (works with or without lock file).
       - name: ⚙️ Setup Node.js 18
         uses: actions/setup-node@v4
         with:
           node-version: '18.19.0'
-          cache: 'npm'
 
-      - name: 📦 Install deps
-        run: npm ci --prefer-offline --no-audit
+      - name: 🗄️ Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            node-modules-${{ runner.os }}-
+
+      - name: 📦 Install dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        run: npm install --legacy-peer-deps --no-audit
 
       - name: 🔷 TypeScript check
         run: npm run type-check
@@ -50,5 +59,5 @@ jobs:
           EXPO_PUBLIC_FIREBASE_API_KEY: test-key
           EXPO_PUBLIC_FIREBASE_PROJECT_ID: test-project
 
-      - name: ✅ PR Quality Gate passed
-        run: echo "All quality checks passed! Ready for review. ✅"
+      - name: ✅ All checks passed
+        run: echo "Quality gate passed — ready for review! ✅"
