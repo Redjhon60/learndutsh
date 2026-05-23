@@ -1,0 +1,54 @@
+# =============================================================================
+# SnowB German AI — PR Quality Gate
+# Runs on every pull request to ensure code quality before merge.
+# This is a lighter, faster workflow than the full CI.
+# =============================================================================
+
+name: 🔍 PR Quality Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main, develop]
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gate:
+    name: 🔍 Quality Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Skip draft PRs
+    if: github.event.pull_request.draft == false
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.19.0'
+          cache: 'npm'
+
+      - name: 📦 Install deps
+        run: npm ci --prefer-offline --no-audit
+
+      - name: 🔷 TypeScript check
+        run: npm run type-check
+
+      - name: 🔍 ESLint
+        run: npm run lint
+
+      - name: 🧪 Tests
+        run: npm test -- --ci --forceExit --passWithNoTests
+        env:
+          EXPO_PUBLIC_APP_ENV: test
+          EXPO_PUBLIC_ANTHROPIC_KEY: test-key
+          EXPO_PUBLIC_FIREBASE_API_KEY: test-key
+          EXPO_PUBLIC_FIREBASE_PROJECT_ID: test-project
+
+      - name: ✅ PR Quality Gate passed
+        run: echo "All quality checks passed! Ready for review. ✅"
